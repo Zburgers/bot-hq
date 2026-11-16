@@ -3,7 +3,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { displayFor } from './box.js';
+import { readPrivate, writePrivate } from './lib/private-files.js';
+import { ensureRuntime, runtimeForBot, stopRuntime } from './local-runtime.js';
+import { box, displayFor } from './box.js';
 import { cdpUrlFor, screenFor } from './computer.js';
 import { db } from './db.js';
 import { env } from './env.js';
@@ -31,7 +33,7 @@ const botRow = (botId: string) => db.prepare('SELECT * FROM bots WHERE id=?').ge
 function readDotenv(file: string): Record<string, string> {
   const out: Record<string, string> = {};
   let text = '';
-  try { text = fs.readFileSync(file, 'utf8'); } catch { return out; }
+  try { text = readPrivate(file); } catch { return out; }
   for (const line of text.split('\n')) {
     const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
     if (!m) continue;
@@ -43,13 +45,7 @@ function readDotenv(file: string): Record<string, string> {
 }
 
 function readYaml(file: string): any {
-  try { return YAML.parse(fs.readFileSync(file, 'utf8')) ?? {}; } catch { return {}; }
-}
-
-function writePrivate(file: string, content: string) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, content, { mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  try { return YAML.parse(readPrivate(file)) ?? {}; } catch { return {}; }
 }
 
 // ---------- identity ----------
@@ -91,7 +87,7 @@ export function assignEngine(botId: string): EngineKind {
   const b = botRow(botId);
   if (!b) throw new Error('bot not found');
   if (b.engine === 'primary' || b.engine === 'managed') return b.engine;
-  if (!primaryBotId()) {
+  if (env.computerProvider !== 'docker' && !primaryBotId()) {
     db.prepare("UPDATE bots SET engine='primary', engine_port=NULL WHERE id=?").run(botId);
     return 'primary';
   }
@@ -109,7 +105,7 @@ const SHARED_ENV = [
 ];
 
 /** Parts of the primary agent's config a managed agent starts from, so it reaches the same models. */
-const SHARED_CONFIG = ['model', 'providers', 'custom_providers', 'auxiliary', 'fallback_model', 'fallback_providers'];
+const SHARED_CONFIG = ['model', 'providers', 'custom_providers', 'auxiliary', 'fallback_model', 'fallback_providers', 'compression', 'memory'];
 
 function soul(b: any): string {
   const owner = (db.prepare('SELECT name FROM users WHERE id=?').get(b.user_id) as any)?.name ?? 'the user';
@@ -128,7 +124,7 @@ export function syncPersona(botId: string) {
   if (!b || b.engine !== 'managed') return;
   const home = homeFor(botId);
   if (!fs.existsSync(home)) return;
-  fs.writeFileSync(path.join(home, 'SOUL.md'), soul(b));
+  writePrivate(path.join(home, 'SOUL.md'), soul(b));
 }
 
 function extraMcpServers(): Record<string, any> {
@@ -159,12 +155,17 @@ async function writeHome(botId: string): Promise<{ home: string; key: string; di
       display = displayFor(s.screenId);
       cdp = cdpUrlFor(botId, s.screenId);
     } catch (e: any) {
+      if (env.computerProvider === 'docker') throw e;
       console.warn(`[engine] no screen for ${b.name} yet: ${e?.message ?? e}`);
     }
   }
 
-  const cwd = env.localBox ? `/root/grokbot/files/${botId}` : path.join(home, 'workspace');
-  fs.mkdirSync(cwd, { recursive: true });
+  const cwd = env.localBox ? `${env.boxHome}/files/${botId}` : path.join(home, 'workspace');
+  if (env.computerProvider === 'docker') {
+    const result = await box.bash(`mkdir -p ${box.quote(cwd)}`, 15, runtimeForBot(botId).screenId);
+    if (result.exit_code !== 0) throw new Error('Could not prepare the bot Library.');
+  }
+  else fs.mkdirSync(cwd, { recursive: true });
 
   const cfgFile = path.join(home, 'config.yaml');
   const fresh = !fs.existsSync(cfgFile);
@@ -184,12 +185,12 @@ async function writeHome(botId: string): Promise<{ home: string; key: string; di
   };
   writePrivate(cfgFile, YAML.stringify(cfg));
 
-  if (!fs.existsSync(path.join(home, 'SOUL.md'))) fs.writeFileSync(path.join(home, 'SOUL.md'), soul(b));
+  if (!fs.existsSync(path.join(home, 'SOUL.md'))) writePrivate(path.join(home, 'SOUL.md'), soul(b));
 
   // Subscription sign-ins live in auth.json. Start from the primary agent's; later sign-ins are this bot's own.
   const auth = path.join(home, 'auth.json');
   if (!fs.existsSync(auth)) {
-    try { writePrivate(auth, fs.readFileSync(path.join(env.hermesHome, 'auth.json'), 'utf8')); } catch { /* the primary agent has none */ }
+    try { writePrivate(auth, readPrivate(path.join(env.hermesHome, 'auth.json'))); } catch { /* the primary agent has none */ }
   }
 
   // .env is ours entirely: the API server plus inherited model keys. Keys the user added by hand are kept.
@@ -202,10 +203,11 @@ async function writeHome(botId: string): Promise<{ home: string; key: string; di
     const v = primaryEnv[k] ?? process.env[k];
     if (v && !vars[k]) vars[k] = v;
   }
-  Object.assign(vars, { API_SERVER_ENABLED: 'true', API_SERVER_KEY: key, API_SERVER_PORT: String(b.engine_port), API_SERVER_HOST: '127.0.0.1' });
+  Object.assign(vars, { API_SERVER_ENABLED: 'true', API_SERVER_KEY: key, API_SERVER_PORT: String(b.engine_port), API_SERVER_HOST: env.computerProvider === 'docker' ? '0.0.0.0' : '127.0.0.1' });
   if (cdp) vars.BROWSER_CDP_URL = cdp; else delete vars.BROWSER_CDP_URL;
   writePrivate(envFile, Object.entries(vars).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
 
+  if (env.computerProvider === 'docker') writePrivate(path.join(home, '.hq-ready'), 'ready\n');
   return { home, key, display };
 }
 
@@ -247,6 +249,7 @@ function gatewayPid(home: string): number | null {
 }
 
 async function stopGateway(botId: string) {
+  if (env.computerProvider === 'docker') { await stopRuntime(botId); return; }
   const home = homeFor(botId);
   const pid = gatewayPid(home);
   if (!pid) return;
@@ -288,12 +291,21 @@ async function startGateway(botId: string): Promise<void> {
   // A gateway from an earlier run of this server is still good: use it as it is.
   if ((await healthy(url)) && managedKey(botId) && (await keyAccepted(url, managedKey(botId)))) return;
   if (await healthy(url)) {
+    if (env.computerProvider === 'docker') throw new Error(`Engine port ${botRow(botId).engine_port} is occupied or rejected its saved key.`);
     if (gatewayPid(homeFor(botId))) await stopGateway(botId);
     else throw new Error(`Port ${botRow(botId).engine_port} is taken by something else.`);
   }
 
   const { home, key, display } = await writeHome(botId);
   keys.set(botId, key);
+  if (env.computerProvider === 'docker') {
+    await ensureRuntime(botId);
+    for (let i = 0; i < 120; i++) {
+      if (await keyAccepted(url, key)) return;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    throw new Error('The Docker Hermes gateway did not become ready within 120 seconds. Check its container log.');
+  }
   if (gatewayPid(home)) await stopGateway(botId);
 
   const log = fs.openSync(path.join(home, 'logs', 'gateway.out.log'), 'a');
@@ -378,6 +390,7 @@ export function engineHome(botId: string): string | null {
  * with `browser.cdp_url`), so the user could be watching an idle desktop.
  */
 export function ownScreenOn(botId: string): boolean {
+  if (env.computerProvider === 'docker') return false;
   const home = engineHome(botId);
   if (!home) return false;
   const dir = path.join(home, 'bot-desktop');
@@ -394,6 +407,7 @@ export function ownScreenOn(botId: string): boolean {
 
 /** Ask Hermes to stop that private screen. Hermes refuses while a person is using it; the refusal is passed on. */
 export function stopOwnScreen(botId: string): Promise<void> {
+  if (env.computerProvider === 'docker') return Promise.resolve();
   const home = engineHome(botId);
   if (!home) return Promise.reject(new Error('This bot has no agent.'));
   return new Promise((resolve, reject) => {
@@ -469,7 +483,7 @@ function toProviders(data: any): EngineProvider[] {
         // Hermes lists Anthropic as an API-key provider, yet it can also sign in to a Claude subscription. Offer that until a key is in place.
         kind: String(p.auth_type ?? '').includes('oauth') || (p.slug === 'anthropic' && !p.authenticated) ? 'subscription' : 'api_key',
         connected: !!p.authenticated,
-        models: featured.filter((m: unknown) => typeof m === 'string').slice(0, 12),
+        models: featured.filter((m: unknown) => typeof m === 'string'),
       };
     });
   const rank = (p: EngineProvider) => (p.connected ? 0 : 1) * 100 + (WELL_KNOWN.indexOf(p.id) < 0 ? 50 : WELL_KNOWN.indexOf(p.id));
@@ -502,15 +516,38 @@ export async function engineInfo(botId: string): Promise<EngineInfo> {
   if (kind === 'managed' && starting.has(botId)) return { ...base, status: 'starting' };
 
   const data = await modelOptions(botId, e);
+  const providers = toProviders(data);
+  if (env.modelCatalogUrl) {
+    const models = await proxyModels();
+    const custom = providers.find((p) => p.id === 'custom');
+    if (custom) { custom.name = 'Razor Crest model proxy'; custom.models = models; custom.connected = models.length > 0; }
+    else providers.unshift({ id: 'custom', name: 'Razor Crest model proxy', kind: 'api_key', connected: models.length > 0, models });
+  }
   return {
     ...base,
     status: 'ready',
     version: typeof health.version === 'string' && health.version !== 'unknown' ? health.version : null,
-    model: b.model ?? data?.model ?? null,
+    model: b.model || data?.model || readYaml(path.join(engineHome(botId)!, 'config.yaml')).model?.default || null,
     provider: b.provider ?? data?.provider ?? null,
-    providers: toProviders(data),
+    providers,
   };
 }
 
 /** After a sign-in the provider list changes; drop what we remembered. */
 export function forgetEngineOptions(botId: string) { optionsCache.delete(botId); }
+
+let catalogCache: { at: number; models: string[] } | null = null;
+
+/** Live model IDs from the configured local proxy, without exposing its credentials. */
+export async function proxyModels(): Promise<string[]> {
+  if (catalogCache && Date.now() - catalogCache.at < 60_000) return catalogCache.models;
+  if (!env.modelCatalogUrl) return [];
+  const res = await fetch(`${env.modelCatalogUrl.replace(/\/+$/, '')}/models`, {
+    headers: { Authorization: `Bearer ${env.modelCatalogKey}` }, signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error('The local model catalog could not be loaded.');
+  const body: any = await res.json();
+  const models = [...new Set<string>((body.data ?? []).map((m: any) => m.id).filter((id: unknown) => typeof id === 'string'))].sort();
+  catalogCache = { at: Date.now(), models };
+  return models;
+}

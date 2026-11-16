@@ -4,11 +4,13 @@ import { db } from './db.js';
 import { userFromCookieHeader } from './lib/auth.js';
 import { vncAuthResponse } from './lib/des.js';
 import { orgo } from './orgo.js';
+import { env } from './env.js';
+import { desktopCall, runtimeForScreen } from './local-runtime.js';
 import { readyScreen, screenFor } from './computer.js';
 import { viewerClosed, viewerOpened } from './idle.js';
 
 /**
- * VNC relay: browser <-> our server <-> Orgo websockify.
+ * VNC relay: browser <-> our server <-> Docker desktopd or Orgo websockify.
  * The server performs the RFB handshake upstream with the computer's VNC password
  * (which is root-equivalent and never reaches the browser), then offers the browser
  * an unauthenticated RFB session. In "watch" mode, client input messages
@@ -160,8 +162,13 @@ async function relay(client: WebSocket, userId: string, botId: string, mode: 'wa
     const { computerId, screenId } = await screenFor(userId, botId);
     // A screen nobody has used yet is bare; set it up while the person is already watching.
     readyScreen(userId, botId).catch(() => {});
-    const { password } = await orgo.vncPassword(computerId);
-    const upUrl = `wss://www.orgo.ai/desktops/${computerId}/ws/websockify?token=${encodeURIComponent(password)}${screenId !== 'default' ? `&screen=${encodeURIComponent(screenId)}` : ''}`;
+    const runtime = env.computerProvider === 'docker' ? runtimeForScreen(screenId) : null;
+    const { password } = runtime
+      ? await desktopCall<{ password: string }>(runtime, 'GET', '/vnc-password')
+      : await orgo.vncPassword(computerId);
+    const upUrl = runtime
+      ? `${runtime.desktopUrl.replace(/^http/, 'ws')}/websockify?token=${encodeURIComponent(password)}`
+      : `wss://www.orgo.ai/desktops/${computerId}/ws/websockify?token=${encodeURIComponent(password)}${screenId !== 'default' ? `&screen=${encodeURIComponent(screenId)}` : ''}`;
     upstream = new WebSocket(upUrl, ['binary']);
     upstream.on('message', (data: Buffer) => {
       if (!piping) return fromUp.push(Buffer.from(data));

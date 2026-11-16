@@ -19,7 +19,8 @@ SCREENS = ROOT + '/screens'
 JOBS = ROOT + '/jobs'
 EXT = ROOT + '/ext'
 LOGS = '/var/log/hq'
-PROFILES = '/root/grokbot/profiles'
+BOX_HOME = os.environ.get('HQ_BOX_HOME', os.path.expanduser('~/grokbot'))
+PROFILES = BOX_HOME + '/profiles'
 HOME_PORT = 7391
 HOME_URL = 'http://127.0.0.1:%d' % HOME_PORT
 BROWSER_CLASS = 'HQBrowser'
@@ -649,7 +650,7 @@ def settle_window(n, pid, wait=4.0):
 
 def open_files(n):
     env = screen_env(n)
-    start = '/root/grokbot/files' if os.path.isdir('/root/grokbot/files') else env['HOME']
+    start = BOX_HOME + '/files' if os.path.isdir(BOX_HOME + '/files') else env['HOME']
     for name in ('thunar', 'nautilus', 'nemo', 'pcmanfm', 'caja'):
         if shutil.which(name):
             return spawn([name, start], env, 'files-%d' % int(n))

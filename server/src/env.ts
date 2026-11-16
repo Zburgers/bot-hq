@@ -17,24 +17,40 @@ function secret(name: string): string {
   throw new Error(`Missing env ${name} (or ${name}_FILE)`);
 }
 
+const docker = process.env.COMPUTER_PROVIDER === 'docker';
 const hermesHome = process.env.HERMES_HOME_PRIMARY ?? path.join(os.homedir(), '.hermes');
 
 export const env = {
+  host: process.env.HOST ?? '127.0.0.1',
+  computerProvider: docker ? 'docker' : 'orgo',
+  boxHome: process.env.BOX_HOME ?? (docker ? '/home/agent/grokbot' : '/root/grokbot'),
+  runtimeImage: process.env.RUNTIME_IMAGE ?? 'bot-hq-desktop:local',
+  runtimeNetwork: process.env.RUNTIME_NETWORK ?? 'grokbot-desktop-net',
+  runtimeDir: process.env.RUNTIME_DIR ?? new URL('../../data/computers', import.meta.url).pathname,
+  desktopPortBase: Number(process.env.DESKTOP_PORT_BASE ?? 18091),
+  mcpListenHost: process.env.MCP_LISTEN_HOST ?? '',
+  mcpListenPort: Number(process.env.MCP_LISTEN_PORT ?? 8878),
+  googleLogin: process.env.GOOGLE_LOGIN === '1',
+  ownerEmail: process.env.OWNER_EMAIL ?? 'owner@localhost',
+  ownerName: process.env.OWNER_NAME ?? 'Owner',
+  ownerPasswordHash: process.env.OWNER_PASSWORD_HASH ?? '',
+  modelCatalogUrl: process.env.MODEL_CATALOG_URL ?? '',
+  modelCatalogKey: process.env.MODEL_CATALOG_KEY ?? '',
   port: Number(process.env.PORT ?? 8787),
   appUrl: process.env.APP_URL ?? 'http://localhost:5173',
   /** Public URL of this server, used for OAuth callbacks. */
   serverUrl: process.env.SERVER_URL ?? `http://localhost:${process.env.PORT ?? 8787}`,
-  xaiKey: req('XAI_API_KEY'),
+  xaiKey: process.env.XAI_API_KEY ?? '',
   xaiModel: process.env.XAI_MODEL ?? 'grok-4.7',
   composioKey: req('COMPOSIO_API_KEY'),
-  orgoKey: secret('ORGO_API_KEY'),
+  orgoKey: docker ? '' : secret('ORGO_API_KEY'),
   sessionSecret: req('SESSION_SECRET'),
   devLogin: process.env.DEV_LOGIN === '1',
   dbPath: process.env.DB_PATH ?? new URL('../../data/grokbot.db', import.meta.url).pathname,
 
   // ---- Hermes engine ----
   /** The `hermes` CLI used to start a gateway for each extra bot. */
-  hermesBin: process.env.HERMES_BIN ?? 'hermes',
+  hermesBin: process.env.HERMES_BIN ?? (docker ? '/opt/hermes-venv/bin/hermes' : 'hermes'),
   /** The primary bot's Hermes home and API server (an agent that already runs; never restarted by us). */
   hermesHome,
   hermesUrl: (process.env.HERMES_URL ?? 'http://127.0.0.1:8642').replace(/\/+$/, ''),
@@ -53,7 +69,7 @@ export const env = {
   /** The Orgo computer every bot works on (one screen each). Empty = legacy one-box-per-user mode is not supported. */
   orgoComputerId: process.env.ORGO_COMPUTER_ID ?? '',
   /** This server runs on that computer, so shell commands run locally instead of through Orgo's API. */
-  localBox: process.env.HQ_LOCAL === '1',
+  localBox: docker || process.env.HQ_LOCAL === '1',
   /**
    * DevTools URL of a Chrome that already runs on the default screen and belongs to the primary bot
    * (e.g. http://127.0.0.1:9333). When set, we never start or stop that screen's Chrome ourselves.

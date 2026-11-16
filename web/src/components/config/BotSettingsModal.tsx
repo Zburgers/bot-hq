@@ -1,3 +1,4 @@
+import { KnowledgeConnections } from './KnowledgeConnections';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AvatarColor, AvatarShape, Bot, Memory, Routine, Skill } from '@shared/types';
 import { BotAvatar, BotAvatarFor, PICKER_SHAPES } from '../../avatar/BotAvatar';
@@ -328,7 +329,7 @@ function MemoriesTab({ bot, data, onChange }: { bot: Bot; data: BotSettingsBundl
     setHidden((h) => new Set(h).add(m.id));
     try { await configApi.deleteMemory(m.id); onChange(); } catch { setHidden((h) => { const n = new Set(h); n.delete(m.id); return n; }); }
   };
-  const fill = data ? Math.min(100, Math.round((data.memory.historyChars / data.memory.compactAtChars) * 100)) : 0;
+  const fill = data && data.memory.compactAtChars > 0 ? Math.min(100, Math.round((data.memory.historyChars / data.memory.compactAtChars) * 100)) : 0;
   return (
     <div className="cfg-page">
       <div className="cfg-page__head">
@@ -360,7 +361,7 @@ function MemoriesTab({ bot, data, onChange }: { bot: Bot; data: BotSettingsBundl
           ))}
         </div>
       )}
-      {data && (
+      {data && data.memory.compactAtChars > 0 && (
         <div className="cfg-meter" title="Older messages are summarized automatically when this fills up.">
           <div className="cfg-meter__label"><span>Conversation memory</span><span>{fill}% full</span></div>
           <div className="cfg-meter__track"><span style={{ width: `${Math.max(2, fill)}%` }} /></div>
@@ -370,6 +371,8 @@ function MemoriesTab({ bot, data, onChange }: { bot: Bot; data: BotSettingsBundl
           </div>
         </div>
       )}
+      {data && data.memory.compactAtChars === 0 && <p className="cfg-field__hint">Hermes keeps these persistent notes and summarizes older conversation context automatically.</p>}
+      {data?.knowledge && <KnowledgeConnections botId={bot.id} knowledge={data.knowledge} onChange={onChange} />}
     </div>
   );
 }

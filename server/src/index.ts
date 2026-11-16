@@ -43,7 +43,12 @@ if (fs.existsSync(webDist)) {
   app.get('*', (c) => c.html(fs.readFileSync(path.join(webDist, 'index.html'), 'utf8')));
 }
 
-const server = serve({ fetch: app.fetch, port: env.port }, (info) => console.log(`[grokbot] server on http://localhost:${info.port}`));
+const server = serve({ fetch: app.fetch, hostname: env.host, port: env.port }, (info) => console.log(`[grokbot] server on http://localhost:${info.port}`));
+if (env.mcpListenHost) {
+  const bridge = new Hono();
+  bridge.route('/mcp', mcpApi);
+  serve({ fetch: bridge.fetch, hostname: env.mcpListenHost, port: env.mcpListenPort });
+}
 attachVncRelay(server as unknown as Server);
 // GROKBOT_NO_SCHEDULER=1 for extra dev/test servers sharing a database copy, so routines and triggers don't fire twice.
 if (process.env.GROKBOT_NO_SCHEDULER !== '1') {

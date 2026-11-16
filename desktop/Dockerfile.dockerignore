@@ -1,0 +1,7 @@
+# Only image build inputs enter the Docker context; host data and credentials stay out.
+**
+!desktop/
+!desktop/**
+!server/
+!server/box/
+!server/box/**

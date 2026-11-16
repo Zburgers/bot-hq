@@ -1,9 +1,10 @@
 import { db, now } from '../db.js';
 import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
+import { screenFor } from '../computer.js';
 import { box } from '../box.js';
 import { env } from '../env.js';
-import { appendRow, getBotRow, listRoutines, toRoutine, describeCron } from '../store.js';
+import { appendRow, getBotRow, listRoutines, listTasks, toRoutine, describeCron } from '../store.js';
 import { executeComposio, innerToolSlugs, isReadOnlySlug, toolkitInfo } from '../composio.js';
 import { scheduleRoutine, unscheduleRoutine } from '../routines.js';
 import { createEventRoutine, deleteEventTrigger, describeEvent, listTriggerTypes } from '../triggers.js';
@@ -11,6 +12,8 @@ import { setCheckins } from '../proactive.js';
 import { createRoom, postToRoom } from './rooms.js';
 import type { ActivityKind } from '../types.js';
 import { Cron } from 'croner';
+import { searchCodexMemory, readCodexMemory } from '../codex-memory.js';
+import { mcpDevices, listMcpTools, callMcpTool, MCP_READ_TOOLS } from '../t3-mcp.js';
 
 export interface ToolCtx {
   userId: string;
@@ -46,6 +49,7 @@ function botByName(userId: string, name: string) {
 
 /** Live X research through xAI's search tool. Returns the answer text followed by the posts it cites. */
 async function xSearch(a: any): Promise<string> {
+  if (!env.xaiKey) throw new Error('Live X search requires an xAI key. Use a connected X app or browser research instead.');
   const clean = (v: unknown) => (Array.isArray(v) ? v.map((h) => String(h).replace(/^@/, '').trim()).filter(Boolean).slice(0, 10) : []);
   const tool: Record<string, unknown> = { type: 'x_search' };
   const only = clean(a.handles);
@@ -87,19 +91,50 @@ async function xSearch(a: any): Promise<string> {
 }
 
 /** Where each bot's Library lives on the shared computer. */
-export const LIBRARY_ROOT = '/root/grokbot/files';
+export const LIBRARY_ROOT = `${env.boxHome}/files`;
 
 export const TOOLS: ToolDef[] = [
   {
+    name: 'list_mcp_devices', description: 'List your approved T3 devices and their authentication status. Use native MCP tools, not browser/curl probes of old relay URLs.',
+    parameters: obj({}), activity: 'connecting_service', label: 'Checking T3 connections',
+    impl: async (_a, ctx) => ({ output: JSON.stringify(mcpDevices(ctx.userId, ctx.botId)) }),
+  },
+  {
+    name: 'list_mcp_tools', description: 'Discover native MCP tools and argument schemas on an approved T3 device. Use query to narrow large catalogs.',
+    parameters: obj({ device: { type: 'string' }, query: { type: 'string' } }, ['device']), activity: 'connecting_service', label: 'Discovering T3 tools',
+    impl: async (a, ctx) => ({ output: JSON.stringify(await listMcpTools(ctx.userId, ctx.botId, a.device, a.query)) }),
+  },
+  {
+    name: 'mcp_call', description: 'Invoke an advertised T3 tool on an approved device using its exact schema. Omit environmentId: device selection provides scope. Writes may require owner approval; access is checked again after approval.',
+    parameters: obj({ device: { type: 'string' }, tool: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } }, ['device', 'tool', 'arguments']), activity: 'connecting_service', label: 'Using T3',
+    impl: async (a, ctx) => ({ output: JSON.stringify(await callMcpTool(ctx.userId, ctx.botId, a.device, a.tool, a.arguments)) }),
+  },
+  {
+    name: 'search_codex_memory',
+    description: 'Search approved Codex persistent knowledge for relevant historical context. Results cite source files and dates. Verify current state before relying on old operational facts.',
+    parameters: obj({ query: { type: 'string' } }, ['query']),
+    activity: 'remembering', label: 'Searching Codex knowledge',
+    impl: async (a, ctx) => ({ output: JSON.stringify(await searchCodexMemory(ctx.userId, ctx.botId, a.query)) }),
+  },
+  {
+    name: 'read_codex_memory',
+    description: 'Read a bounded excerpt from an approved Codex memory source returned by search. These files are read-only historical evidence.',
+    parameters: obj({ source: { type: 'string' }, path: { type: 'string' }, start_line: { type: 'integer' }, line_count: { type: 'integer' } }, ['source', 'path']),
+    activity: 'remembering', label: 'Reading Codex knowledge',
+    impl: async (a, ctx) => ({ output: JSON.stringify(await readCodexMemory(ctx.userId, ctx.botId, a.source, a.path, a.start_line, a.line_count)) }),
+  },
+
+  {
     name: 'save_file',
-    description: "Save a finished deliverable (report, notes, CSV, code, markdown) to your Library so the user can open and download it. Saved under /root/grokbot/files/<your id>/ on your computer. Files you write into that folder yourself show up in the Library too.",
+    description: "Save a finished deliverable (report, notes, CSV, code, markdown) to your Library so the user can open and download it. Saved under your own Library folder on your computer. Files you write into that folder yourself show up in the Library too.",
     parameters: obj({ filename: { type: 'string', description: 'e.g. briefing-2026-11-09.md' }, content: { type: 'string' } }, ['filename', 'content']),
     activity: 'drafting_file',
     label: 'Saving a file',
     impl: async (a, ctx) => {
       const name = String(a.filename).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'file.txt';
       const file = `${LIBRARY_ROOT}/${ctx.botId}/${name}`;
-      await box.writeFile(file, String(a.content ?? ''));
+      const screen = await screenFor(ctx.userId, ctx.botId);
+      await box.writeFile(file, String(a.content ?? ''), '0644', screen.screenId);
       return { output: JSON.stringify({ ok: true, path: file }), summary: `Saved ${name}` };
     },
   },
@@ -242,15 +277,53 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'list_tasks',
+    description: 'List your saved task checklist, including IDs, states, and notes. Use these IDs to settle completed work with update_task; a task record is not a running background job.',
+    parameters: obj({}),
+    activity: 'working',
+    label: 'Checking tasks',
+    impl: async (_a, ctx) => ({ output: JSON.stringify(listTasks(ctx.botId)) }),
+  },
+  {
     name: 'update_task',
     description: 'Update a task: state is working, needs_input, or done.',
     parameters: obj({ task_id: { type: 'string' }, state: { type: 'string', enum: ['working', 'needs_input', 'done'] }, note: { type: 'string' } }, ['task_id', 'state']),
     activity: 'working',
     label: 'Updating a task',
     impl: async (a, ctx) => {
-      db.prepare('UPDATE tasks SET state=?, note=COALESCE(?, note), updated_at=? WHERE id=? AND bot_id=?').run(a.state, a.note ?? null, now(), a.task_id, ctx.botId);
+      if (!['working', 'needs_input', 'done'].includes(a.state)) return { output: 'Invalid task state.' };
+      const result = db.prepare('UPDATE tasks SET state=?, note=COALESCE(?, note), updated_at=? WHERE id=? AND bot_id=?').run(a.state, a.note ?? null, now(), a.task_id, ctx.botId);
+      if (!result.changes) return { output: 'Task not found on your checklist.' };
       hub.emit(ctx.userId, { type: 'tasks', botId: ctx.botId });
       return { output: 'Updated.' };
+    },
+  },
+  {
+    name: 'create_bot',
+    description: "Create a permanent native Bot on the user's Bot HQ team when the user asks for a new teammate. It appears in the sidebar and keeps its instructions and context across sessions. This is not an external app connection or a temporary subagent. Pass all relevant user-provided project context, then use send_to_bot to hand it work. An existing name is reused without changing its instructions.",
+    parameters: obj({
+      name: { type: 'string', description: 'Name of the permanent teammate, e.g. 7Oceans' },
+      label: { type: 'string', description: 'Short role or job title' },
+      description: { type: 'string' },
+      instructions: { type: 'string', description: 'Standing instructions for this Bot' },
+      context: { type: 'string', description: 'Self-contained project facts and user context to retain permanently' },
+    }, ['name']),
+    activity: 'working',
+    label: 'Creating a teammate',
+    impl: async (a, ctx) => {
+      const creator = getBotRow(ctx.botId);
+      if (!creator || creator.user_id !== ctx.userId || creator.hidden) return { output: JSON.stringify({ error: 'Only a permanent Bot on your own team can create teammates.' }) };
+      const name = typeof a.name === 'string' ? a.name.trim().slice(0, 60) : '';
+      if (!name) return { output: JSON.stringify({ error: 'A Bot name is required.' }) };
+      const existing = botByName(ctx.userId, name);
+      if (existing) {
+        if (existing.hidden || existing.kind === 'room') return { output: JSON.stringify({ error: 'That name belongs to a helper or group chat. Choose another name.' }) };
+        return { output: JSON.stringify({ created: false, bot_id: existing.id, name: existing.name, note: 'This teammate already exists. Instructions were preserved; use send_to_bot to contact it.' }) };
+      }
+      const instructions = [a.instructions, a.context ? `Project context:\n${a.context}` : ''].filter(Boolean).join('\n\n');
+      const { createBot } = await import('../routes.js');
+      const bot = createBot(ctx.userId, { name, label: a.label, description: a.description, instructions });
+      return { output: JSON.stringify({ created: true, bot_id: bot.id, name: bot.name, note: 'Permanent teammate created with the supplied instructions and context. Use send_to_bot to hand it work.' }), summary: `Created ${bot.name}` };
     },
   },
   {
@@ -332,6 +405,12 @@ export const toolMap = new Map(TOOLS.map((t) => [t.name, t]));
 export type Decision = 'allow' | 'ask' | 'block';
 
 export function policyFor(userId: string, toolName: string, args: any): { decision: Decision; key: string; toolkit?: string; title: string } {
+  if (toolName === 'mcp_call') {
+    const key = `mcp:${String(args.device)}:${String(args.tool)}`;
+    const saved = db.prepare('SELECT mode FROM policies WHERE user_id=? AND tool=?').get(userId, key) as any;
+    const decision: Decision = saved?.mode === 'blocked' ? 'block' : saved?.mode === 'always_allow' || MCP_READ_TOOLS.has(args.tool) ? 'allow' : 'ask';
+    return { decision, key, title: `T3: run ${String(args.tool)} on ${String(args.device)}` };
+  }
   if (toolMap.has(toolName)) return { decision: 'allow', key: toolName, title: toolName };
   const slugs = innerToolSlugs(toolName, args);
   if (!slugs.length) {

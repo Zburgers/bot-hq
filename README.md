@@ -1,3 +1,5 @@
+> Razor Crest local setup: see [local runtime and operations](docs/local-runtime.md) and [migration](docs/grokbot-migration.md). This branch supports per-bot Docker desktops without Orgo.
+
 <p align="center">
   <img src="assets/readme-banner.svg" alt="Bot HQ. Your team. Their own computers." width="100%">
 </p>

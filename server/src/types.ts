@@ -59,6 +59,8 @@ export type RowBody =
   | NoticeBody;
 
 export interface MessageBody {
+  /** Original Bot authorities retained when messages are forwarded. */
+  scopeBotIds?: string[];
   type: 'message';
   role: 'user' | 'assistant';
   text: string;

@@ -16,6 +16,7 @@ export function Composer({ bot, running }: { bot: Bot; running: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [menu, setMenu] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const voiceEnabled = useStore((s) => s.features.voice);
   const setModal = useStore((s) => s.setModal);
 
   // Per-bot drafts.
@@ -111,7 +112,7 @@ export function Composer({ bot, running }: { bot: Bot; running: boolean }) {
           />
         </div>
         <div className="composer__right">
-          <button
+          {voiceEnabled && <button
             type="button"
             className={`composer__btn${dictation.state === 'recording' ? ' is-recording' : dictation.state === 'transcribing' ? ' is-transcribing' : ''}`}
             aria-label={dictation.state === 'recording' ? 'Stop dictation' : 'Dictate'}
@@ -124,7 +125,7 @@ export function Composer({ bot, running }: { bot: Bot; running: boolean }) {
             onContextMenu={(e) => e.preventDefault()}
           >
             <Icon name="mic" opacity={0.56} />
-          </button>
+          </button>}
           {inCall && !hasText ? (
             <button type="button" className="composer__cta is-in-call" onClick={endCall} aria-label="End voice call" title="End voice call">
               <Icon name="voice_a" size={16} />
@@ -137,10 +138,10 @@ export function Composer({ bot, running }: { bot: Bot; running: boolean }) {
             <button
               type="button"
               className="composer__cta"
-              onClick={hasText ? send : () => startCall(bot.id)}
-              disabled={hasText && sending}
+              onClick={hasText ? send : voiceEnabled ? () => startCall(bot.id) : undefined}
+              disabled={sending || (!hasText && !voiceEnabled)}
               aria-label={hasText ? 'Send' : `Start voice chat with ${bot.name}`}
-              title={hasText ? 'Send (Enter)' : 'Start voice chat'}
+              title={hasText ? 'Send (Enter)' : voiceEnabled ? 'Start voice chat' : 'Type a message'}
             >
               <Icon name={hasText ? 'arrow_up' : 'voice_a'} size={16} />
             </button>

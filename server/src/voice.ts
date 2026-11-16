@@ -15,6 +15,10 @@ import type { ActivityKind, EventBody, MessageBody, RowBody, VoiceCallRecord, Vo
 import { listMemories } from './engine-memory.js';
 
 export const voiceApi = new Hono<AuthVars>();
+voiceApi.use('*', async (c, next) => {
+  if (!env.xaiKey) return c.json({ error: 'Voice is not configured on this server.' }, 503);
+  await next();
+});
 
 const XAI = 'https://api.x.ai/v1';
 const VOICE_MODEL = process.env.XAI_VOICE_MODEL ?? 'grok-voice-latest';
@@ -357,7 +361,7 @@ voiceApi.post('/tool', async (c) => {
   }
 });
 
-const xai = new OpenAI({ apiKey: env.xaiKey, baseURL: XAI, timeout: 45_000 });
+const xai = new OpenAI({ apiKey: env.xaiKey || 'disabled', baseURL: XAI, timeout: 45_000 });
 
 async function summarizeCall(botName: string, transcript: { role: string; text: string }[], tasks: string[]): Promise<string | null> {
   if (!transcript.length && !tasks.length) return null;

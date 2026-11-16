@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { box, displayFor } from './box.js';
+import { env } from './env.js';
 
 /**
  * The desk: what makes one screen of the shared computer look like one bot's own tidy computer.
@@ -80,12 +81,12 @@ async function script(args: string[], screenId?: string, timeoutSec = 60): Promi
 interface JobResult { ok?: boolean; error?: string; warnings?: string[]; [k: string]: unknown }
 
 /** Follow a detached job on the computer to its end. Its warnings are logged; a failure throws. */
-async function finish(first: Reply, what: string, maxSec: number): Promise<JobResult> {
+async function finish(first: Reply, what: string, maxSec: number, screenId?: string): Promise<JobResult> {
   let reply = first;
   const end = Date.now() + maxSec * 1000;
   while (reply.kind === 'RUNNING') {
     if (Date.now() > end) throw new Error(`${what} is taking too long (still running after ${maxSec}s)`);
-    reply = await script(['wait', reply.rest.trim(), '25']);
+    reply = await script(['wait', reply.rest.trim(), '25'], screenId);
   }
   if (reply.kind === 'OK') return { ok: true };
   if (reply.kind !== 'DONE') throw new Error(`${what} failed: ${reply.raw.trim().slice(-300) || 'no answer from the computer'}`);
@@ -98,15 +99,16 @@ async function finish(first: Reply, what: string, maxSec: number): Promise<JobRe
 
 // ---------------------------------------------------------------- one-time machine setup
 
-let basePromise: Promise<void> | null = null;
+const basePromises = new Map<string, Promise<void>>();
+const baseKey = (screenId?: string) => env.computerProvider === 'docker' ? screenId ?? '' : 'shared';
 
-async function setupBase(): Promise<void> {
+async function setupBase(screenId?: string): Promise<void> {
   const b = bundle();
-  const check = await script(['base-check', b.hash]);
+  const check = await script(['base-check', b.hash], screenId);
   if (check.kind === 'BASE_OK') return;
   // The scripts are missing or changed: send them over in one piece and unpack.
   const packed = gzipSync(Buffer.from(JSON.stringify({ files: b.files }), 'utf8'));
-  await box.writeFile(`${ROOT}/bundle.json.gz`, packed);
+  await box.writeFile(`${ROOT}/bundle.json.gz`, packed, '0644', screenId);
   const unpack = [
     'import gzip, json, os',
     `root = ${JSON.stringify(ROOT)}`,
@@ -125,20 +127,21 @@ async function setupBase(): Promise<void> {
     "os.unlink(root + '/bundle.json.gz')",
     "print('HQ_UNPACKED')",
   ].join('\n');
-  const r = await box.bash(`python3 -c ${box.quote(unpack)} 2>&1`, 60);
+  const r = await box.bash(`python3 -c ${box.quote(unpack)} 2>&1`, 60, screenId);
   if (!r.output.includes('HQ_UNPACKED')) {
     throw new Error(`could not install the desktop scripts on the computer (python3 is needed): ${r.output.trim().slice(-300)}`);
   }
   // Package installs can take a while on a fresh computer.
-  await finish(await script(['base', b.hash]), 'computer setup', 900);
+  await finish(await script(['base', b.hash], screenId), 'computer setup', 900, screenId);
 }
 
 /** One-time machine setup (packages, scripts, home server, Chrome policy/extension). Idempotent, memoised per process, cheap when already done. */
-export function ensureDeskBase(): Promise<void> {
-  if (!basePromise) {
-    basePromise = setupBase().catch((e) => { basePromise = null; throw e; });
+export function ensureDeskBase(screenId?: string): Promise<void> {
+  const key = baseKey(screenId);
+  if (!basePromises.has(key)) {
+    basePromises.set(key, setupBase(screenId).catch((e) => { basePromises.delete(key); throw e; }));
   }
-  return basePromise;
+  return basePromises.get(key)!;
 }
 
 // ---------------------------------------------------------------- colours
@@ -334,12 +337,12 @@ async function dress(bot: DeskBot, screenId: string, manageChrome: boolean, flag
   const args = ['go', String(n), bundle().hash, stamp, flags || '-', payload];
   let reply = await script(args, screenId);
   if (reply.kind === 'NOBASE' || reply.kind === 'NONE') {
-    basePromise = null;                 // whatever we knew about the computer is out of date
-    await ensureDeskBase();
+    basePromises.delete(baseKey(screenId));
+    await ensureDeskBase(screenId);
     reply = await script(args, screenId);
     if (reply.kind === 'NOBASE') throw new Error(`${what} failed: the desktop scripts on the computer do not run (${reply.raw.trim().slice(-200)})`);
   }
-  await finish(reply, what, 240);
+  await finish(reply, what, 240, screenId);
 }
 
 /** Make `screenId` look like `bot`'s computer. Idempotent and quick when nothing changed (keep a stamp on the box of what was applied so a repeat call is ~1 bash call). Options:
@@ -369,9 +372,9 @@ export function undressScreen(botId: string, screenId: string): Promise<void> {
 
 /** Open a visible terminal window on that screen running `command` (window stays open after it exits, titled `title`). Used for sign-in flows the user completes by taking control of the screen. */
 export async function openTerminal(screenId: string, command: string, title?: string): Promise<void> {
-  await ensureDeskBase();
+  await ensureDeskBase(screenId);
   const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
   const reply = await script(['terminal', String(displayNumber(screenId)), b64(command), title ? b64(title) : '-'], screenId);
   if (reply.kind !== 'DONE') throw new Error(`could not open a terminal on screen ${screenId}: ${reply.raw.trim().slice(-300)}`);
-  await finish(reply, `opening a terminal on screen ${screenId}`, 30);
+  await finish(reply, `opening a terminal on screen ${screenId}`, 30, screenId);
 }

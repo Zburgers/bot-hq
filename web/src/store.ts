@@ -9,6 +9,7 @@ interface Transcript { generation: number; bySeq: Record<number, Row>; loaded: b
 interface State {
   user: User | null;
   devLogin: boolean;
+  features: { passwordLogin: boolean; googleLogin: boolean; voice: boolean };
   authChecked: boolean;
 
   bots: Bot[];
@@ -42,15 +43,16 @@ interface State {
   set(p: Partial<State>): void;
 }
 
-const LS_SELECTED = 'grokbot.selectedBot';
-const LS_DETAILS = 'grokbot.detailsOpen';
-const LS_SIDEBAR = 'grokbot.sidebarCollapsed';
+const LS_SELECTED = 'bot-hq.selectedBot';
+const LS_DETAILS = 'bot-hq.detailsOpen';
+const LS_SIDEBAR = 'bot-hq.sidebarCollapsed';
 const lsGet = (k: string) => { try { return localStorage.getItem(k); } catch { return null; } };
 const lsSet = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } };
 
 export const useStore = create<State>((set, get) => ({
   user: null,
   devLogin: false,
+  features: { passwordLogin: false, googleLogin: false, voice: false },
   authChecked: false,
   bots: [],
   live: {},
@@ -69,8 +71,8 @@ export const useStore = create<State>((set, get) => ({
 
   async checkAuth() {
     try {
-      const { user, devLogin } = await api.me();
-      set({ user, devLogin, authChecked: true });
+      const { user, devLogin, features } = await api.me();
+      set({ user, devLogin, features, authChecked: true });
     } catch {
       set({ user: null, authChecked: true });
     }

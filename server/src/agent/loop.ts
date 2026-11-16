@@ -1,3 +1,5 @@
+import { readPrivate } from '../lib/private-files.js';
+import path from 'node:path';
 import { db, now } from '../db.js';
 import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
@@ -23,8 +25,8 @@ import { activityFor, appToolName, humanizeSlug, policyFor } from './tools.js';
 export type Trigger =
   | { type: 'user'; text: string }
   | { type: 'routine'; routineId: string; name: string; prompt: string }
-  | { type: 'bot'; fromBotId: string; fromName: string; text: string; depth: number }
-  | { type: 'system'; text: string };
+  | { type: 'bot'; fromBotId: string; fromName: string; text: string; depth: number; scopeBotIds?: string[] }
+  | { type: 'system'; text: string; scopeBotIds?: string[] };
 
 // ---------- per-bot serial queue ----------
 
@@ -60,7 +62,7 @@ export const isBotBusy = (botId: string) => queues.has(botId);
 export function enqueueBotMessage(fromBotId: string, toBotId: string, text: string, depth: number) {
   const from = getBotRow(fromBotId);
   appendRow(toBotId, 'message', { type: 'message', role: 'user', text, from: { kind: 'bot', id: fromBotId, name: from.name } });
-  enqueue(toBotId, { type: 'bot', fromBotId, fromName: from.name, text, depth });
+  enqueue(toBotId, { type: 'bot', fromBotId, fromName: from.name, text, depth, scopeBotIds: [...new Set([...turnOriginBotIds(fromBotId), fromBotId])] });
 }
 
 function triggerText(t: Trigger): string {
@@ -82,6 +84,7 @@ interface Turn {
   userId: string;
   /** How many bot-to-bot hops led here (send_to_bot stops a ping-pong at 3). */
   depth: number;
+  originBotIds: string[];
   /** A tool ended the conversation for now (asked the user, stayed silent): drop any closing text. */
   silent: boolean;
   tools: ToolRef[];
@@ -90,6 +93,12 @@ interface Turn {
 }
 
 const turns = new Map<string, Turn>();
+
+export function turnOriginBotIds(botId: string): string[] {
+  const active = turns.get(botId);
+  if (active) return active.originBotIds;
+  try { return JSON.parse(getBotRow(botId)?.knowledge_scope_bot_ids ?? '[]'); } catch { return []; }
+}
 
 export const turnDepth = (botId: string) => turns.get(botId)?.depth ?? 0;
 
@@ -305,7 +314,9 @@ async function runTurn(botId: string, trigger: Trigger) {
   const userId: string = bot.user_id;
   const ctrl = new AbortController();
   aborts.set(botId, ctrl);
-  const turn: Turn = { botId, userId, depth: trigger.type === 'bot' ? trigger.depth : 0, silent: false, tools: [], outcomes: new Map() };
+  const origins = trigger.type === 'bot' || trigger.type === 'system' ? [...new Set([...(trigger.scopeBotIds ?? []), ...(trigger.type === 'bot' ? [trigger.fromBotId] : [])])] : [];
+  db.prepare('UPDATE bots SET knowledge_scope_bot_ids=? WHERE id=?').run(JSON.stringify(origins), botId);
+  const turn: Turn = { botId, userId, originBotIds: origins, depth: trigger.type === 'bot' ? trigger.depth : 0, silent: false, tools: [], outcomes: new Map() };
   turns.set(botId, turn);
   setLive(botId, { isRunning: true, activity: { kind: 'thinking', since: now() }, awaiting: null, startedAt: now(), caption: null, steps: 0 });
 
@@ -356,6 +367,12 @@ async function runTurn(botId: string, trigger: Trigger) {
     if (ctrl.signal.aborted) throw new Error('interrupted');
 
     let input = triggerText(trigger);
+    if (!bot.migration_handoff_sent) {
+      try {
+        const handoff = readPrivate(path.join(engine.home, 'MIGRATION-HANDOFF.md')).slice(0, 24000);
+        input = `[Migration handoff: historical context from the previous application. Verify changeable claims and prefer your current native tools over old capability statements.]\n${handoff}\n\n[Current message]\n${input}`;
+      } catch {}
+    }
     if (bot.handback_at) {
       input = `[Note: the user took control of your screen for a while and has just handed it back. Look at the screen before you rely on what was there.]\n\n${input}`;
       db.prepare('UPDATE bots SET handback_at=NULL WHERE id=?').run(botId);
@@ -378,6 +395,7 @@ async function runTurn(botId: string, trigger: Trigger) {
       }),
     });
     if (!res.ok || !res.body) throw new Error(await failureText(res));
+    db.prepare('UPDATE bots SET migration_handoff_sent=1 WHERE id=?').run(botId);
 
     for await (const ev of sseEvents(res.body)) {
       const d = ev.data;

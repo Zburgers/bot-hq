@@ -12,6 +12,7 @@ import { computerState, ensureComputer, forgetBotFiles, readyScreen, refreshComp
 import { assignEngine, provisionEngine, removeEngine, syncPersona } from './engine.js';
 import { deleteMemory, listMemories, memoryBot } from './engine-memory.js';
 import { orgo } from './orgo.js';
+import { desktopCall, runtimeForScreen } from './local-runtime.js';
 import { catalog, connectedToolkits, deleteConnection, disconnect, googleProfile, startConnect, startGoogleLogin, toolkitInfo } from './composio.js';
 import { runRoutine, scheduleRoutine, unscheduleRoutine } from './routines.js';
 import { deleteEventTrigger } from './triggers.js';
@@ -35,7 +36,7 @@ class UserError extends Error {}
 
 const agentCount = () => (db.prepare("SELECT COUNT(*) n FROM bots WHERE COALESCE(kind,'agent')<>'room' AND COALESCE(hidden,0)=0").get() as any).n as number;
 
-function createBot(userId: string, b: { name: string; label?: string; description?: string; instructions?: string; avatarShape?: string; avatarColor?: string; mode?: string; isPrimary?: boolean }) {
+export function createBot(userId: string, b: { name: string; label?: string; description?: string; instructions?: string; avatarShape?: string; avatarColor?: string; mode?: string; isPrimary?: boolean }) {
   // Every bot needs a screen of its own on the one shared computer.
   if (agentCount() >= env.maxBots) throw new UserError(`The team is full: the computer has room for ${env.maxBots} bots. Remove one to add another.`);
   const id = newId('bot');
@@ -64,10 +65,37 @@ function findOrCreateUser(email: string, name?: string, preferId?: string) {
 
 api.get('/auth/me', (c) => {
   const user = userFromCookieHeader(c.req.header('cookie'));
-  return c.json({ user, devLogin: env.devLogin });
+  return c.json({ user, devLogin: env.devLogin, features: { passwordLogin: !!env.ownerPasswordHash, googleLogin: env.googleLogin, voice: !!env.xaiKey } });
+});
+
+// Single-owner password login. OWNER_PASSWORD_HASH = "scrypt$<salt hex>$<key hex>" (scripts/hash-password.mjs).
+const loginFails: number[] = [];
+function checkOwnerPassword(password: string): boolean {
+  const [alg, saltHex, keyHex] = env.ownerPasswordHash.split('$');
+  if (alg !== 'scrypt' || !saltHex || !keyHex) return false;
+  const want = Buffer.from(keyHex, 'hex');
+  const got = crypto.scryptSync(password, Buffer.from(saltHex, 'hex'), want.length);
+  return crypto.timingSafeEqual(got, want);
+}
+
+api.post('/auth/password', async (c) => {
+  if (!env.ownerPasswordHash) return c.json({ error: 'disabled' }, 403);
+  const t = Date.now();
+  while (loginFails.length && loginFails[0] < t - 10 * 60_000) loginFails.shift();
+  if (loginFails.length >= 10) return c.json({ error: 'Too many attempts. Try again in a few minutes.' }, 429);
+  const { password } = await c.req.json<{ password?: string }>().catch(() => ({ password: '' }));
+  if (!password || !checkOwnerPassword(String(password))) {
+    loginFails.push(t);
+    await new Promise((r) => setTimeout(r, 600));
+    return c.json({ error: 'Wrong password' }, 401);
+  }
+  const { id } = findOrCreateUser(env.ownerEmail, env.ownerName);
+  createSession(c, id);
+  return c.json({ ok: true });
 });
 
 api.get('/auth/google/start', async (c) => {
+  if (!env.googleLogin) return c.json({ error: 'disabled' }, 404);
   const attemptId = newId('login');
   const provisional = newId('usr');
   const cb = `${env.serverUrl}/api/auth/google/callback?attempt=${attemptId}`;
@@ -77,6 +105,7 @@ api.get('/auth/google/start', async (c) => {
 });
 
 api.get('/auth/google/callback', async (c) => {
+  if (!env.googleLogin) return c.json({ error: 'disabled' }, 404);
   const attempt = db.prepare('SELECT * FROM login_attempts WHERE id=?').get(c.req.query('attempt') ?? '') as any;
   const caId = c.req.query('connected_account_id') ?? attempt?.connected_account_id;
   if (!attempt || c.req.query('status') === 'failed' || !caId) return c.redirect(`${env.appUrl}/?login=failed`);
@@ -390,9 +419,11 @@ api.get('/bots/:id/screenshot', async (c) => {
   const b = ownBot(user.id, c.req.param('id'));
   if (!b) return c.json({ error: 'not found' }, 404);
   const scr = db.prepare('SELECT screen_id FROM screens WHERE bot_id=?').get(b.id) as any;
-  if (!env.orgoComputerId || computerState(user.id).status !== 'running' || !scr) return c.body(null, 204);
+    if ((env.computerProvider !== 'docker' && !env.orgoComputerId) || computerState(user.id).status !== 'running' || !scr) return c.body(null, 204);
   try {
-    const s = await orgo.screenshot(env.orgoComputerId, scr.screen_id);
+    const s = env.computerProvider === 'docker'
+      ? await desktopCall<{ image: string; mime_type?: string }>(runtimeForScreen(scr.screen_id), 'GET', '/screenshot')
+      : await orgo.screenshot(env.orgoComputerId, scr.screen_id);
     const b64 = s.image.replace(/^data:[^,]+,/, '');
     return c.body(Buffer.from(b64, 'base64'), 200, { 'Content-Type': s.mime_type ?? 'image/jpeg', 'Cache-Control': 'no-store' });
   } catch {

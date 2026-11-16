@@ -15,3 +15,7 @@ docs/INTERNAL-*.md
 docs/SPEC.md
 web/screenshots/
 tests/out/
+
+# Python migration test caches
+__pycache__/
+*.pyc

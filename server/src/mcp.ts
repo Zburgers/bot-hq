@@ -3,7 +3,8 @@ import { Hono } from 'hono';
 import { getBotRow } from './store.js';
 import { composioTools } from './composio.js';
 import { mcpToken, primaryBotId } from './engine.js';
-import { claimToolRow, enqueueBotMessage, markSilent, noteToolOutcome, requestApproval, turnDepth } from './agent/loop.js';
+import { claimToolRow, enqueueBotMessage, markSilent, noteToolOutcome, requestApproval, turnDepth, turnOriginBotIds } from './agent/loop.js';
+import { allowedDevice, withKnowledgeScope } from './knowledge-policy.js';
 import { policyFor, runComposioTool, toolMap, TOOLS, type ToolCtx } from './agent/tools.js';
 
 /**
@@ -58,14 +59,7 @@ async function callTool(botId: string | null, rawName: string, args: any): Promi
   const rowSeq = await claimToolRow(botId, name);
   const ctx: ToolCtx = { userId, botId, enqueueBotMessage, depth: turnDepth(botId) };
   try {
-    const own = toolMap.get(name);
-    if (own) {
-      const r = await own.impl(args, ctx);
-      if (r.endTurn) markSilent(botId);
-      noteToolOutcome(botId, rowSeq, { status: 'done', summary: r.summary });
-      return text(r.output);
-    }
-
+    if (name === 'mcp_call') allowedDevice(userId, botId, String(args.device));
     const pol = policyFor(userId, name, args);
     if (pol.decision === 'block') {
       noteToolOutcome(botId, rowSeq, { status: 'denied', summary: 'Not allowed' });
@@ -75,6 +69,14 @@ async function callTool(botId: string | null, rawName: string, args: any): Promi
       const answer = await requestApproval({ userId, botId }, pol, args, rowSeq);
       if (answer !== 'allow') return text(answer === 'deny' ? DECLINED : SKIPPED);
     }
+    const own = toolMap.get(name);
+    if (own) {
+      const r = await own.impl(args, ctx);
+      if (r.endTurn) markSilent(botId);
+      noteToolOutcome(botId, rowSeq, { status: 'done', summary: r.summary });
+      return text(r.output);
+    }
+
     const r = await runComposioTool(ctx, name, args);
     noteToolOutcome(botId, rowSeq, { status: r.summary === 'failed' ? 'error' : 'done', summary: r.summary === 'failed' ? 'Failed' : undefined });
     return text(r.output);
@@ -117,7 +119,10 @@ async function handle(msg: any, botId: string | null): Promise<object | null> {
       const name = params?.name;
       if (typeof name !== 'string' || !name) return rpcError(id, -32602, 'Missing tool name');
       const args = params?.arguments && typeof params.arguments === 'object' ? params.arguments : {};
-      return { jsonrpc: '2.0', id, result: await callTool(botId, name, args) };
+      const bot = botId ? getBotRow(botId) : null;
+      const invoke = () => callTool(botId, name, args);
+      const result = bot ? await withKnowledgeScope(bot.user_id, turnOriginBotIds(bot.id), invoke) : await invoke();
+      return { jsonrpc: '2.0', id, result };
     }
     case 'resources/list':
       return { jsonrpc: '2.0', id, result: { resources: [] } };

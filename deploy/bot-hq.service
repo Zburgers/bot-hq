@@ -1,0 +1,15 @@
+[Unit]
+Description=Bot HQ local Hermes team
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Desktop/bot-hq/server
+ExecStart=/home/linuxbrew/.linuxbrew/bin/node --env-file=%h/Desktop/bot-hq/.env dist/index.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

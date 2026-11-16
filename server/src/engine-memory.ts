@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { sha256 } from './lib/ids.js';
 import { engineHome } from './engine.js';
+import { readPrivate, writePrivate } from './lib/private-files.js';
 import type { Memory } from './types.js';
 
 /**
@@ -16,9 +17,9 @@ const FILES = [
   { key: 'u', file: 'USER.md', source: 'chat' as const },
 ];
 
-function read(file: string): { entries: string[]; mtime: number } {
+function read(file: string, home: string): { entries: string[]; mtime: number } {
   try {
-    const raw = fs.readFileSync(file, 'utf8');
+    const raw = readPrivate(file, home);
     return { entries: raw.split(SEP).map((e) => e.trim()).filter(Boolean), mtime: fs.statSync(file).mtimeMs };
   } catch {
     return { entries: [], mtime: 0 };
@@ -33,7 +34,7 @@ export function listMemories(botId: string): Memory[] {
   if (!home) return [];
   const out: Memory[] = [];
   for (const f of FILES) {
-    const { entries, mtime } = read(path.join(home, 'memories', f.file));
+    const { entries, mtime } = read(path.join(home, 'memories', f.file), home);
     for (const text of entries) out.push({ id: idFor(botId, f.key, text), botId, text, createdAt: Math.round(mtime), source: f.source });
   }
   return out;
@@ -52,9 +53,9 @@ export function deleteMemory(id: string): boolean {
   const f = FILES.find((x) => x.key === id.split('.')[2]);
   if (!f) return false;
   const file = path.join(home, 'memories', f.file);
-  const { entries } = read(file);
+  const { entries } = read(file, home);
   const keep = entries.filter((text) => idFor(botId, f.key, text) !== id);
   if (keep.length === entries.length) return false;
-  fs.writeFileSync(file, keep.join(SEP) + (keep.length ? '\n' : ''));
+  writePrivate(file, keep.join(SEP) + (keep.length ? '\n' : ''), home);
   return true;
 }

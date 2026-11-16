@@ -10,11 +10,15 @@ import { env } from './env.js';
 import { emitBot, getBotRow, listRoutines, listTasks } from './store.js';
 import { computerState, readyScreen, resetBotScreen } from './computer.js';
 import { box } from './box.js';
+import { getLive } from './store.js';
 import { orgo } from './orgo.js';
 import { openTerminal } from './desk.js';
-import { engineHome, engineInfo, engineKind, forgetEngineOptions, restartEngine, stopOwnScreen } from './engine.js';
+import { proxyModels, engineHome, engineInfo, engineKind, forgetEngineOptions, restartEngine, stopOwnScreen } from './engine.js';
 import { listMemories } from './engine-memory.js';
 import { idleConfig, viewerCount } from './idle.js';
+import { allowedDevice, allowedSources, setDeviceToken } from './knowledge-policy.js';
+import { callMcpTool, listMcpTools, mcpDevices } from './t3-mcp.js';
+import { pairMcpDevice } from './t3-pairing.js';
 import type { LibraryFile, Skill } from './types.js';
 
 /**
@@ -43,9 +47,46 @@ configApi.get('/bots/:id/settings', (c) => {
     skills: listSkills(b.id),
     routines: listRoutines(b.id),
     tasks: listTasks(b.id),
+    knowledge: { sources: allowedSources(b.user_id, b.id).map(s => ({ id: s.id, label: s.label })), devices: mcpDevices(b.user_id, b.id) },
     // The agent keeps its own memory and trims its own context; there is nothing for the app to maintain.
     memory: { lastConsolidatedAt: null, historyChars: 0, compactAtChars: 0, lastCompaction: null },
   });
+});
+
+configApi.post('/bots/:id/mcp/:device/token', async (c) => {
+  const bot = ownBot(c.get('user').id, c.req.param('id'));
+  if (!bot) return c.json({ error: 'not found' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  try {
+    setDeviceToken(bot.user_id, bot.id, c.req.param('device'), body.token, body.expiresAt);
+    return c.json({ ok: true });
+  } catch { return c.json({ error: 'Invalid token, expiry, or device grant.' }, 400); }
+});
+
+configApi.post('/bots/:id/mcp/:device/pair', async (c) => {
+  const bot = ownBot(c.get('user').id, c.req.param('id'));
+  if (!bot) return c.json({ error: 'not found' }, 404);
+  try { allowedDevice(bot.user_id, bot.id, c.req.param('device')); }
+  catch { return c.json({ error: 'Device access denied.' }, 403); }
+  const body = await c.req.json().catch(() => ({}));
+  try { return c.json(await pairMcpDevice(bot.user_id, bot.id, c.req.param('device'), body.code)); }
+  catch { return c.json({ error: 'Pairing failed. Create a fresh pairing link in the running T3 app for this device and try again.' }, 400); }
+});
+
+configApi.post('/bots/:id/mcp/:device/test', async (c) => {
+  const bot = ownBot(c.get('user').id, c.req.param('id'));
+  if (!bot) return c.json({ error: 'not found' }, 404);
+  try { allowedDevice(bot.user_id, bot.id, c.req.param('device')); }
+  catch { return c.json({ error: 'Device access denied.' }, 403); }
+  try {
+    const device = c.req.param('device');
+    const catalog = await listMcpTools(bot.user_id, bot.id, device, 'environment');
+    const identity = catalog.tools.find(t => t.name === 't3_environment_read');
+    if (!identity) return c.json({ error: 'Authenticated tool discovery succeeded, but the expected T3 identity tool is missing.' }, 502);
+    const result = await callMcpTool(bot.user_id, bot.id, device, identity.name, {});
+    if (result.isError) return c.json({ error: 'MCP authentication succeeded, but the server identity tool returned an error.' }, 502);
+    return c.json({ ok: true, toolCount: catalog.total });
+  } catch (e: any) { return c.json({ error: e.message }, 502); }
 });
 
 // ---------- skills ----------
@@ -127,6 +168,12 @@ configApi.patch('/bots/:id/engine', async (c) => {
   const b = ownBot(c.get('user').id, c.req.param('id'));
   if (!b) return c.json({ error: 'not found' }, 404);
   const p = await c.req.json<{ provider?: string | null; model?: string | null }>().catch(() => ({} as { provider?: string | null; model?: string | null }));
+  if (getLive(b.id).isRunning) return c.json({ error: 'Stop this bot or wait for its current turn before changing models.' }, 409);
+  if (p.model && (p.provider ?? b.provider ?? 'custom') === 'custom' && env.modelCatalogUrl) {
+    try {
+      if (!(await proxyModels()).includes(p.model)) return c.json({ error: 'That model is not available from the local proxy.' }, 400);
+    } catch { return c.json({ error: 'Could not verify the model catalog. Try again.' }, 502); }
+  }
   const clean = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 120) : null);
   if (p.provider !== undefined) db.prepare('UPDATE bots SET provider=?, updated_at=? WHERE id=?').run(clean(p.provider), now(), b.id);
   if (p.model !== undefined) db.prepare('UPDATE bots SET model=?, updated_at=? WHERE id=?').run(clean(p.model), now(), b.id);
@@ -146,7 +193,7 @@ configApi.post('/bots/:id/engine/login', async (c) => {
   const home = engineHome(b.id);
   if (!home) return c.json({ error: 'This bot has no agent.' }, 409);
   // The agent's files are on the machine this server runs on; a terminal on another machine cannot reach them.
-  if (!box.local) return c.json({ error: 'Sign-in opens a terminal on the computer. It works once the app runs on that computer.' }, 409);
+  if (!box.local && env.computerProvider !== 'docker') return c.json({ error: 'Sign-in opens a terminal on the computer. It works once the app runs on that computer.' }, 409);
   const { provider } = await c.req.json<{ provider?: string }>().catch(() => ({} as { provider?: string }));
   if (provider !== undefined && !/^[a-z0-9][a-z0-9._-]{0,40}$/.test(provider)) return c.json({ error: 'bad provider' }, 400);
   const hermes = `HERMES_HOME=${box.quote(home)} ${box.quote(env.hermesBin)}`;
@@ -198,7 +245,7 @@ configApi.post('/bots/:id/handback', (c) => {
 
 // ---------- library: files under /root/grokbot/files/<botId> on the bot's computer ----------
 
-const LIB_ROOT = '/root/grokbot/files';
+const LIB_ROOT = `${env.boxHome}/files`;
 
 function safeRel(p: string | undefined): string | null {
   const rel = (p ?? '').replace(/^\/+|\/+$/g, '');
@@ -232,7 +279,8 @@ configApi.get('/bots/:id/files', async (c) => {
   try {
     if (!box.local && computerState(user.id).status !== 'running') return c.json({ status: 'asleep', path: rel, files: [] });
     const dir = `${LIB_ROOT}/${b.id}${rel ? `/${rel}` : ''}`;
-    const r = await box.bash(`mkdir -p ${shq(`${LIB_ROOT}/${b.id}`)} && ls -la --time-style=+%s ${shq(dir)} 2>&1`, 30);
+    const screen = await readyScreen(user.id, b.id);
+    const r = await box.bash(`mkdir -p ${shq(`${LIB_ROOT}/${b.id}`)} && ls -la --time-style=+%s ${shq(dir)} 2>&1`, 30, screen.screenId);
     if (r.exit_code !== 0) return c.json({ status: 'error', path: rel, files: [], error: (r.output ?? '').slice(0, 300) });
     return c.json({ status: 'ok', path: rel, files: parseLs(r.output ?? '') });
   } catch (e: any) {
@@ -248,7 +296,7 @@ configApi.post('/bots/:id/files/download', async (c) => {
   const rel = safeRel(path);
   if (!rel) return c.json({ error: 'bad path' }, 400);
   // On the computer itself the file is on our own disk: serve it directly.
-  if (box.local) return c.json({ url: `/api/bots/${b.id}/files/raw?path=${encodeURIComponent(rel)}` });
+  if (box.local || env.computerProvider === 'docker') return c.json({ url: `/api/bots/${b.id}/files/raw?path=${encodeURIComponent(rel)}` });
   try {
     if (!env.orgoComputerId) return c.json({ error: 'computer unavailable' }, 409);
     const r: any = await orgo.exportFile(env.orgoComputerId, `${LIB_ROOT}/${b.id}/${rel}`);
@@ -260,11 +308,21 @@ configApi.post('/bots/:id/files/download', async (c) => {
   }
 });
 
-configApi.get('/bots/:id/files/raw', (c) => {
+configApi.get('/bots/:id/files/raw', async (c) => {
   const b = ownBot(c.get('user').id, c.req.param('id'));
-  if (!b || !box.local) return c.json({ error: 'not found' }, 404);
+  if (!b || (!box.local && env.computerProvider !== 'docker')) return c.json({ error: 'not found' }, 404);
   const rel = safeRel(c.req.query('path'));
   if (!rel) return c.json({ error: 'bad path' }, 400);
+  if (env.computerProvider === 'docker') {
+    const screen = await readyScreen(c.get('user').id, b.id);
+    const data = await box.readFile(`${LIB_ROOT}/${b.id}/${rel}`, screen.screenId);
+    if (!data) return c.json({ error: 'not found' }, 404);
+    return new Response(new Uint8Array(data), { headers: {
+      'content-type': 'application/octet-stream',
+      'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(rel.split('/').pop()!)}`,
+      'x-content-type-options': 'nosniff',
+    } });
+  }
   const root = `${LIB_ROOT}/${b.id}`;
   let file: string;
   try {

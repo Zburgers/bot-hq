@@ -21,6 +21,7 @@ export interface BotSettingsBundle {
   skills: Skill[];
   routines: Routine[];
   tasks: Task[];
+  knowledge: { sources: { id: string; label: string }[]; devices: { id: string; label: string; url: string; configured: boolean; expiresAt: number | null; checkedAt: number | null; connected: boolean; detail: string }[] };
   memory: { lastConsolidatedAt: number | null; historyChars: number; compactAtChars: number; lastCompaction: { method: string; created_at: number } | null };
 }
 
@@ -40,6 +41,10 @@ export const configApi = {
   deleteBot: (botId: string) => req<{ ok: true }>('DELETE', `/bots/${botId}`),
   makePrimary: (botId: string) => req<{ ok: true }>('POST', `/bots/${botId}/primary`),
   fresh: (botId: string) => req<{ ok: true }>('POST', `/bots/${botId}/fresh`),
+
+  setMcpToken: (botId: string, device: string, token: string) => req<{ ok: true }>('POST', `/bots/${botId}/mcp/${encodeURIComponent(device)}/token`, { token }),
+  pairMcp: (botId: string, device: string, code: string) => req<{ ok: true }>('POST', `/bots/${botId}/mcp/${encodeURIComponent(device)}/pair`, { code }),
+  testMcp: (botId: string, device: string) => req<{ ok: true; toolCount: number }>('POST', `/bots/${botId}/mcp/${encodeURIComponent(device)}/test`),
 
   deleteMemory: (id: string) => req<{ ok: true }>('DELETE', `/memories/${id}`),
 

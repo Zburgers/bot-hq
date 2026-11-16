@@ -5,8 +5,13 @@ import { orgo, OrgoError, type OrgoScreen } from './orgo.js';
 import { cdpPortFor, dressScreen, resetScreen, undressScreen, type DeskBot } from './desk.js';
 import { box } from './box.js';
 import type { ComputerState } from './types.js';
+import fs from 'node:fs/promises';
+import { desktopCall, ensureRuntime, runtimeForBot, runtimeForScreen } from './local-runtime.js';
 
 /**
+ * Docker bots each use the default display of an isolated container. The stored screen id is a
+ * logical route to that bot's runtime, not its in-container X display.
+ *
  * One Orgo computer for the whole team (ORGO_COMPUTER_ID), one screen per bot. The primary bot's
  * engine already lives on that computer's own desktop, so it keeps the default screen; every other
  * bot gets a screen of its own, dressed in its colour (see desk.ts). The computer is never created,
@@ -19,6 +24,7 @@ export const MAX_SCREENS = 4;
 export interface BotScreen { computerId: string; screenId: string; width?: number; height?: number }
 
 function computerId(): string {
+  if (env.computerProvider === 'docker') return 'local';
   if (!env.orgoComputerId) throw new Error('ORGO_COMPUTER_ID is not set, so there is no computer for the bots to use.');
   return env.orgoComputerId;
 }
@@ -45,7 +51,7 @@ export function computerState(userId: string): ComputerState {
     screenId: s.screen_id as string,
     ...(s.width && s.height ? { width: s.width as number, height: s.height as number } : {}),
   }));
-  return { status: r.status, orgoId: env.orgoComputerId || r.orgo_id, error: r.error, screens, maxScreens: Math.min(env.maxBots, MAX_SCREENS) };
+  return { status: r.status, orgoId: env.computerProvider === 'docker' ? 'local' : env.orgoComputerId || r.orgo_id, error: r.error, screens, maxScreens: env.computerProvider === 'docker' ? env.maxBots : Math.min(env.maxBots, MAX_SCREENS) };
 }
 
 function mapStatus(s: string): ComputerState['status'] {
@@ -75,6 +81,7 @@ let inflight: Promise<string> | null = null;
 /** Make sure the shared computer is awake. Returns its Orgo id. */
 export function ensureComputer(userId: string): Promise<string> {
   const id = computerId();
+  if (env.computerProvider === 'docker') return Promise.resolve(id);
   if (Date.now() - checkedAt < 30_000) return Promise.resolve(id);
   if (inflight) return inflight;
   inflight = (async () => {
@@ -120,7 +127,7 @@ function deskBot(botId: string): DeskBot | null {
 const isPrimaryEngine = (botId: string) => (db.prepare('SELECT engine FROM bots WHERE id=?').get(botId) as any)?.engine === 'primary';
 
 /** The primary bot's own Chrome (when PRIMARY_CDP_URL names one) is never started or stopped by us. */
-const managesChrome = (botId: string) => !(isPrimaryEngine(botId) && env.primaryCdpUrl);
+const managesChrome = (botId: string) => env.computerProvider === 'docker' || !(isPrimaryEngine(botId) && env.primaryCdpUrl);
 
 const verified = new Map<string, number>();
 const leasing = new Map<string, Promise<BotScreen>>();
@@ -140,6 +147,21 @@ export function screenFor(userId: string, botId: string): Promise<BotScreen> {
 }
 
 async function lease(userId: string, botId: string): Promise<BotScreen> {
+  if (env.computerProvider === 'docker') {
+    try {
+      const runtime = await ensureRuntime(botId);
+      const result = await desktopCall<{ screens: OrgoScreen[] }>(runtime, 'GET', '/screens');
+      const screen = result.screens.find((item) => item.default || item.id === 'default');
+      if (!screen) throw new Error('The bot desktop has no default screen');
+      db.prepare('INSERT OR REPLACE INTO screens(bot_id,user_id,screen_id,last_used_at,width,height) VALUES (?,?,?,?,?,?)')
+        .run(botId, userId, runtime.screenId, now(), screen.width || null, screen.height || null);
+      setStatus(userId, 'running');
+      return { computerId: 'local', screenId: runtime.screenId, width: screen.width, height: screen.height };
+    } catch (error: any) {
+      setStatus(userId, 'error', String(error?.message ?? error));
+      throw error;
+    }
+  }
   const id = await ensureComputer(userId);
   const mine = db.prepare('SELECT screen_id, width, height FROM screens WHERE bot_id=?').get(botId) as any;
   if (mine) {
@@ -204,6 +226,7 @@ export async function readyScreen(userId: string, botId: string, opts: { redress
 
 /** DevTools address of the Chrome on this bot's screen (for Hermes' browser tools). */
 export function cdpUrlFor(botId: string, screenId: string): string {
+  if (env.computerProvider === 'docker') return 'http://127.0.0.1:9299';
   if (isPrimaryEngine(botId) && env.primaryCdpUrl) return env.primaryCdpUrl;
   return `http://127.0.0.1:${cdpPortFor(screenId)}`;
 }
@@ -213,6 +236,12 @@ export function cdpUrlFor(botId: string, screenId: string): string {
  * answers. Without this a bot's first turn finds no browser and goes off to start one of its own.
  */
 export async function screenForWork(userId: string, botId: string): Promise<void> {
+  if (env.computerProvider === 'docker') {
+    const s = await readyScreen(userId, botId);
+    const alive = await box.bash('curl -fsS http://127.0.0.1:9299/json/version >/dev/null', 5, s.screenId);
+    if (alive.exit_code !== 0) await readyScreen(userId, botId, { redress: true });
+    return;
+  }
   if (!env.orgoComputerId) return;
   if (!managesChrome(botId)) {
     // It brings its own browser, so nothing it needs depends on the dressing: don't make it wait.
@@ -239,7 +268,7 @@ export async function releaseScreen(botId: string): Promise<void> {
   db.prepare('DELETE FROM screens WHERE bot_id=?').run(botId);
   dressing.delete(botId);
   verified.delete(botId);
-  if (mine.screen_id !== 'default') {
+  if (env.computerProvider !== 'docker' && mine.screen_id !== 'default') {
     try { await undressScreen(botId, mine.screen_id); } catch (e: any) { console.warn(`[computer] undress failed: ${e?.message ?? e}`); }
   }
   hub.emit(mine.user_id, { type: 'computer', state: computerState(mine.user_id) });
@@ -248,7 +277,11 @@ export async function releaseScreen(botId: string): Promise<void> {
 /** A deleted bot leaves nothing behind on the computer: its browser profile and its Library folder go. */
 export async function forgetBotFiles(botId: string): Promise<void> {
   if (!/^bot_[\w-]+$/.test(botId)) return;
-  await box.bash(`rm -rf -- /root/grokbot/profiles/${botId} /root/grokbot/files/${botId}`, 60);
+  if (env.computerProvider === 'docker') {
+    await fs.rm(runtimeForBot(botId).filesRoot, { recursive: true, force: true });
+    return;
+  }
+  await box.bash(`rm -rf -- ${box.quote(`${env.boxHome}/profiles/${botId}`)} ${box.quote(`${env.boxHome}/files/${botId}`)}`, 60);
 }
 
 /** The shared computer is never suspended from the app (other things live on it). */
@@ -256,6 +289,18 @@ export async function suspendComputer(_userId: string, _reason = 'manual'): Prom
 
 /** Refresh status and screen sizes from Orgo (cheap; used when the UI opens). */
 export async function refreshComputer(userId: string): Promise<ComputerState> {
+  if (env.computerProvider === 'docker') {
+    try {
+      const screens = db.prepare('SELECT bot_id, screen_id FROM screens WHERE user_id=?').all(userId) as { bot_id: string; screen_id: string }[];
+      await Promise.all(screens.map(async (screen) => {
+        const runtime = runtimeForScreen(screen.screen_id);
+        const result = await desktopCall<{ screens: OrgoScreen[] }>(runtime, 'GET', '/screens', undefined, 3000);
+        saveSize(screen.bot_id, result.screens.find((item) => item.default));
+      }));
+      setStatus(userId, screens.length ? 'running' : 'starting');
+    } catch (error: any) { setStatus(userId, 'error', String(error?.message ?? error)); }
+    return computerState(userId);
+  }
   if (!env.orgoComputerId) {
     setStatus(userId, 'error', 'ORGO_COMPUTER_ID is not set.');
     return computerState(userId);
