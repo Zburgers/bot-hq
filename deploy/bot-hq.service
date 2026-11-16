@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/Desktop/bot-hq/server
+ExecStartPre=/usr/bin/docker info --format "{{.ServerVersion}}"
 ExecStart=/home/linuxbrew/.linuxbrew/bin/node --env-file=%h/Desktop/bot-hq/.env dist/index.js
 Restart=on-failure
 RestartSec=5

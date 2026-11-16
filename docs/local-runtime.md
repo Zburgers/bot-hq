@@ -39,7 +39,7 @@ systemctl --user restart bot-hq.service
 
 The first command is only needed when the base image is absent or intentionally updated. On Razor Crest it already exists for Grokbot; avoid rebuilding that shared tag during ordinary Bot HQ updates. Hermes and its computer driver are pinned in the dedicated image. A new image takes effect when the affected bot's Engine is restarted, which recreates only its owned container. Profiles and files persist. The readiness marker prevents Hermes from loading stale config while the host refreshes it.
 
-Install the example unit from `deploy/bot-hq.service` under `~/.config/systemd/user/`, then daemon-reload and enable it. The host Docker service must be running before managed engines can start; a transient startup failure can be retried through Engine settings. Container restart policies restore running bots after Docker restarts. The server does not operate another Hermes installation.
+Install the example unit from `deploy/bot-hq.service` under `~/.config/systemd/user/`, then daemon-reload and enable it. The unit checks the host Docker daemon before starting and retries every five seconds until it is available. A later engine failure can be retried through Engine settings. Container restart policies restore running bots after Docker restarts. The server does not operate another Hermes installation.
 
 The side-by-side deployment sets `GROKBOT_NO_SCHEDULER=1` to prevent duplicate routines/check-ins. New chat, connected apps, computer use and T3 tools work interactively. Schedule migration is a separate cutover decision: disable old schedulers before enabling the new one. xAI voice and live X-search require an optional xAI key; ordinary chat does not.
 
