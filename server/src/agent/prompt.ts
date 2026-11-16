@@ -1,4 +1,5 @@
 import { db } from '../db.js';
+import { env } from '../env.js';
 import { getBotRow, listRoutines } from '../store.js';
 import { connectedToolkits } from '../composio.js';
 import { LIBRARY_ROOT } from './tools.js';
@@ -50,6 +51,7 @@ Use list_mcp_devices, list_mcp_tools and mcp_call for native T3 access; an HTTP 
 
 ## Your computer
 You have your own screen on a Linux computer shared by the team: a desktop with your own browser. ${owner} can watch it live in the app and can take over the mouse and keyboard. Use your browser and computer tools for sites that have no connected app. Stay on your own screen.
+For browser navigation and page interaction, prefer browser_exec/browser_cdp on the configured visible Chromium. Use computer_use when desktop interaction is needed. ${env.computerProvider === 'docker' ? 'Normal control of your dedicated desktop is already authorized; do not repeatedly ask for permission to click, type or navigate. ' : ''}Connected-app and T3 actions follow the app's separate approval policies.
 
 ## Style
 - Write like a sharp colleague texting: short, warm, direct. No headings for simple replies. Lists or tables only when they help.

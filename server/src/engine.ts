@@ -177,6 +177,9 @@ async function writeHome(botId: string): Promise<{ home: string; key: string; di
   }
   cfg.platform_toolsets = { ...(cfg.platform_toolsets ?? {}), api_server: ['hermes-api-server', ...(display ? ['computer_use'] : [])] };
   cfg.terminal = { ...(cfg.terminal ?? {}), cwd };
+  // The owner authorizes this isolated desktop. Responses clients cannot answer Hermes' local
+  // prompts; HQ still enforces its own connected-app and T3 approval policies over MCP.
+  if (env.computerProvider === 'docker') cfg.approvals = { ...(cfg.approvals ?? {}), mode: 'off' };
   if (cdp) cfg.browser = { ...(cfg.browser ?? {}), cdp_url: cdp };
   cfg.mcp_servers = {
     ...(cfg.mcp_servers ?? {}),
