@@ -3,6 +3,7 @@ import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { appendRow } from '../store.js';
 import { currentKnowledgeScope } from '../knowledge-policy.js';
+import type { ImageAttachment } from '../types.js';
 
 /**
  * Group chats ("rooms"; Grok Bot: GrokBotAgent kind=ROOM, member_agent_ids, server turn-taking).
@@ -39,7 +40,7 @@ export function createRoom(userId: string, name: string, memberIds: string[]) {
 }
 
 /** Called instead of the agent loop when the user posts in a room. */
-export function dispatchRoomMessage(roomId: string, text: string, enqueue: (botId: string, t: any) => void) {
+export function dispatchRoomMessage(roomId: string, text: string, enqueue: (botId: string, t: any) => void, images?: ImageAttachment[]) {
   const room = db.prepare('SELECT * FROM bots WHERE id=?').get(roomId) as any;
   const members = roomMembers(roomId);
   if (!members.length) {
@@ -59,6 +60,7 @@ export function dispatchRoomMessage(roomId: string, text: string, enqueue: (botI
     enqueue(m.id, {
       type: 'system',
       scopeBotIds,
+      images,
       text:
         `[Group chat "${room.name}"] Members: ${members.map((x) => x.name).join(', ')}. ` +
         `${mentioned.length ? 'You were @mentioned.' : 'The user addressed the whole group.'}\n` +

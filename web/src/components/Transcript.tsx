@@ -63,6 +63,7 @@ const Bubble = memo(function Bubble({ row, side, pos }: { row: Row; side: 'left'
     <div className={`bubble-wrap is-${side}`}>
       <div className={`bubble is-${side === 'right' ? 'user' : 'agent'}${pos}${b.streaming ? ' is-streaming' : ''}`}>
         {side === 'right' ? <div className="bubble__plain">{b.text}</div> : <Markdown text={b.text || ' '} />}
+        {b.images?.map((image, index) => <img key={`${image.name}-${index}`} className="bubble__image" src={image.dataUrl} alt={image.name || 'Attached image'} />)}
         {b.citations && b.citations.length > 0 && (
           <div className="bubble__cites">
             {b.citations.slice(0, 6).map((c, i) => {

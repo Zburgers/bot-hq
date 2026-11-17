@@ -286,13 +286,28 @@ api.get('/bots/:id/rows', (c) => {
 api.post('/bots/:id/messages', async (c) => {
   const b = ownBot(c.get('user').id, c.req.param('id'));
   if (!b) return c.json({ error: 'not found' }, 404);
-  const { text } = await c.req.json<{ text: string }>();
-  if (!text?.trim()) return c.json({ error: 'empty' }, 400);
-  const row = appendRow(b.id, 'message', { type: 'message', role: 'user', text: text.trim() });
+  const { text = '', images = [] } = await c.req.json<{ text?: string; images?: unknown }>();
+  if (typeof text !== 'string' || !Array.isArray(images) || images.length > 4) return c.json({ error: 'invalid message' }, 400);
+  const accepted: { name: string; mimeType: string; dataUrl: string }[] = [];
+  let totalBytes = 0;
+  for (const image of images) {
+    if (!image || typeof image !== 'object') return c.json({ error: 'invalid image' }, 400);
+    const value = image as Record<string, unknown>;
+    if (typeof value.dataUrl !== 'string' || typeof value.mimeType !== 'string' || typeof value.name !== 'string') return c.json({ error: 'invalid image' }, 400);
+    const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/.exec(value.dataUrl);
+    if (!match || match[1] !== value.mimeType) return c.json({ error: 'unsupported image format' }, 400);
+    const bytes = Math.floor(match[2].length * 3 / 4) - (match[2].endsWith('==') ? 2 : match[2].endsWith('=') ? 1 : 0);
+    totalBytes += bytes;
+    if (bytes <= 0 || bytes > 10 * 1024 * 1024 || totalBytes > 10 * 1024 * 1024) return c.json({ error: 'Images must total 10 MB or less.' }, 413);
+    accepted.push({ name: value.name.slice(0, 255), mimeType: value.mimeType, dataUrl: value.dataUrl });
+  }
+  if (!text.trim() && accepted.length === 0) return c.json({ error: 'empty' }, 400);
+  const trimmed = text.trim();
+  const row = appendRow(b.id, 'message', { type: 'message', role: 'user', text: trimmed, ...(accepted.length ? { images: accepted } : {}) });
   // Group chats dispatch to their member Bots instead of running their own loop.
-  if (b.kind === 'room') dispatchRoomMessage(b.id, text.trim(), enqueue);
+  if (b.kind === 'room') dispatchRoomMessage(b.id, trimmed || 'Please look at the attached image.', enqueue, accepted);
   // Any pending question card is answered by a free-text message.
-  else enqueue(b.id, { type: 'user', text: text.trim() });
+  else enqueue(b.id, { type: 'user', text: trimmed || 'Please look at the attached image.', ...(accepted.length ? { images: accepted } : {}) });
   return c.json({ row });
 });
 

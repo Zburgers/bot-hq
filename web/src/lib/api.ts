@@ -34,7 +34,7 @@ export const api = {
   createBot: (b: Pick<Bot, 'name' | 'avatarShape' | 'avatarColor' | 'mode'>) => req<{ bot: Bot }>('POST', '/bots', b),
   markRead: (id: string) => req<{ ok: true }>('POST', `/bots/${id}/read`),
   rows: (id: string) => req<{ generation: number; rows: Row[] }>('GET', `/bots/${id}/rows`),
-  send: (id: string, text: string) => req<{ row: Row }>('POST', `/bots/${id}/messages`, { text }),
+  send: (id: string, text: string, images: { name: string; mimeType: string; dataUrl: string }[] = []) => req<{ row: Row }>('POST', `/bots/${id}/messages`, { text, images }),
   interrupt: (id: string) => req<{ ok: true }>('POST', `/bots/${id}/interrupt`),
   fresh: (id: string) => req<{ ok: true }>('POST', `/bots/${id}/fresh`),
 

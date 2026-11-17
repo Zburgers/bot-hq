@@ -4,7 +4,7 @@ import { db, now } from '../db.js';
 import { newId } from '../lib/ids.js';
 import { hub } from '../lib/hub.js';
 import { appendRow, emitBot, getBotRow, getLive, getRow, setLive, updateRow } from '../store.js';
-import type { ActivityKind, MessageBody, ToolCallBody } from '../types.js';
+import type { ActivityKind, ImageAttachment, MessageBody, ToolCallBody } from '../types.js';
 import { toolkitInfo } from '../composio.js';
 import { screenForWork } from '../computer.js';
 import { engineFor } from '../engine.js';
@@ -23,10 +23,10 @@ import { activityFor, appToolName, humanizeSlug, policyFor } from './tools.js';
  */
 
 export type Trigger =
-  | { type: 'user'; text: string }
+  | { type: 'user'; text: string; images?: ImageAttachment[] }
   | { type: 'routine'; routineId: string; name: string; prompt: string }
   | { type: 'bot'; fromBotId: string; fromName: string; text: string; depth: number; scopeBotIds?: string[] }
-  | { type: 'system'; text: string; scopeBotIds?: string[] };
+  | { type: 'system'; text: string; scopeBotIds?: string[]; images?: ImageAttachment[] };
 
 // ---------- per-bot serial queue ----------
 
@@ -378,6 +378,13 @@ async function runTurn(botId: string, trigger: Trigger) {
       db.prepare('UPDATE bots SET handback_at=NULL WHERE id=?').run(botId);
     }
 
+    const images = trigger.type === 'user' || trigger.type === 'system' ? trigger.images : undefined;
+    const inputContent = images?.length
+      ? [
+          { type: 'input_text', text: input },
+          ...images.map((image) => ({ type: 'input_image', image_url: image.dataUrl, detail: 'auto' })),
+        ]
+      : null;
     const res = await fetch(`${engine.url}/v1/responses`, {
       method: 'POST',
       signal: ctrl.signal,
@@ -385,7 +392,7 @@ async function runTurn(botId: string, trigger: Trigger) {
       body: JSON.stringify({
         model: bot.model || 'hermes-agent',
         ...(bot.provider ? { provider: bot.provider } : {}),
-        input,
+        input: inputContent ? [{ role: 'user', content: inputContent }] : input,
         instructions: await instructionsFor(userId, botId),
         // One engine-side thread per conversation; "New chat" bumps the generation and starts another.
         conversation: `hq-${botId}-g${bot.generation}`,

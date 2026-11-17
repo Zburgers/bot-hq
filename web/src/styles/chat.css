@@ -56,6 +56,7 @@
 .bubble.is-agent { background: linear-gradient(180deg, #FFFFFF29 0%, #FFFFFF00 100%), var(--color-bubble-agent); color: var(--color-ink); }
 .bubble.is-user { background: linear-gradient(180deg, #FFFFFF0F 0%, #FFFFFF00 100%), var(--bot-bubble, var(--color-bubble-user)); color: #FFFFFF; }
 .bubble__plain { white-space: pre-wrap; }
+.bubble__image { display: block; max-width: min(100%, 480px); max-height: 360px; margin-top: 8px; border-radius: 8px; object-fit: contain; }
 /* Grouped bubble "tail" corners (README: bottom-left on first, top-left on last). Mirrored for user bubbles. */
 .bubble.is-agent.is-first { border-bottom-left-radius: 6px; }
 .bubble.is-agent.is-mid { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
@@ -216,6 +217,12 @@
 
 /* ---------- composer ---------- */
 .composer-area { flex-shrink: 0; padding: 0 16px 16px; position: relative; }
+.composer-area.is-dragging .composer { border-color: var(--color-border-focus); }
+.composer__drop-hint { position: absolute; inset: 0 16px 16px; z-index: 2; display: grid; place-items: center; border: 1px dashed var(--color-border-focus); border-radius: var(--radius-composer); background: color-mix(in srgb, var(--color-bg-pane) 88%, transparent); color: var(--color-text-primary); pointer-events: none; }
+.composer__attachments { display: flex; gap: 8px; max-width: 960px; margin: 0 auto 8px; }
+.composer__attachment { position: relative; width: 64px; height: 64px; }
+.composer__attachment img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; box-shadow: 0 0 0 1px var(--color-border-secondary); }
+.composer__attachment button { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%; background: var(--color-bg-elevated); box-shadow: 0 0 0 1px var(--color-border-secondary); text-align: center; line-height: 18px; }
 .composer {
   display: flex; align-items: flex-end; justify-content: space-between; gap: 8px;
   max-width: 960px; min-height: 44px; margin: 0 auto; padding: 0 8px;
